@@ -1,24 +1,43 @@
-# Operations runbook — antigravity-telegram-bridge
+# Antigravity Telegram Bridge — Operations Runbook
 
-Step-by-step guide for installing, operating, and troubleshooting the Telegram→Antigravity (`agy`) bridge.
+Step-by-step guide and operational reference for installing, configuring, running, monitoring, and troubleshooting the Telegram ↔ Antigravity (`agy`) bridge.
 
 ---
 
-## Contents
+## Table of Contents
 
 1. [Prerequisites](#prerequisites)
-2. [Get a Telegram bot token](#get-a-telegram-bot-token)
-3. [Find your Telegram user ID](#find-your-telegram-user-id)
-4. [Configure the bridge](#configure-the-bridge)
-5. [Install](#install)
-6. [Start the bridge](#start-the-bridge)
-7. [Verify end-to-end](#verify-end-to-end)
-8. [Daily ops](#daily-ops)
+2. [Setup & Configuration](#setup--configuration)
+   - [Get a Telegram Bot Token](#get-a-telegram-bot-token)
+   - [Find Your Telegram User ID](#find-your-telegram-user-id)
+   - [Configuration Reference](#configuration-reference)
+3. [Installation](#installation)
+4. [Service Management](#service-management)
+   - [Quick Cheat-Sheet](#quick-cheat-sheet)
+   - [Systemd Commands](#systemd-commands)
+   - [Control via agy Plugin](#control-via-agy-plugin)
+   - [Headless Boot (Lingering)](#headless-boot-lingering)
+5. [Health Checks & Verification](#health-checks--verification)
+   - [End-to-End Smoke Test](#end-to-end-smoke-test)
+   - [Health & Diagnostic Commands](#health--diagnostic-commands)
+6. [Hardening & Security](#hardening--security)
+   - [Systemd Hardening](#systemd-hardening)
+   - [File Permissions](#file-permissions)
+   - [Lock Bot to DM / Single Chat](#lock-bot-to-dm--single-chat)
+   - [Token Hygiene & Rotation](#token-hygiene--rotation)
+   - [Backups](#backups)
+7. [Log Rotation](#log-rotation)
+8. [Metrics & Observability](#metrics--observability)
 9. [Troubleshooting](#troubleshooting)
+   - [Memory Growth & Limits](#memory-growth--limits)
+   - [Bot Not Responding Checklist](#bot-not-responding-checklist)
+   - [agy CLI Errors](#agy-cli-errors)
+   - [Webhook Issues](#webhook-issues)
+   - [Common Failure Modes & Solutions](#common-failure-modes--solutions)
 10. [Upgrading](#upgrading)
 11. [Uninstall](#uninstall)
-12. [Pushing to GitHub](#pushing-to-github)
-13. [Architecture refresher](#architecture-refresher)
+12. [Pushing to GitHub & Pre-Push Checklist](#pushing-to-github--pre-push-checklist)
+13. [Architecture Refresher & File Index](#architecture-refresher--file-index)
 
 ---
 
@@ -26,56 +45,43 @@ Step-by-step guide for installing, operating, and troubleshooting the Telegram�
 
 | Requirement | Why | How to verify |
 |---|---|---|
-| Linux with systemd `--user` | Daemon supervisor | `systemctl --user status` returns without error |
+| Linux with `systemd --user` | Daemon supervisor | `systemctl --user status` returns without error |
 | Python ≥ 3.11 | Runtime | `python3 --version` |
-| `uv` ≥ 0.4 | Venv + dep management | `uv --version` |
-| `agy` CLI on `PATH` | The backend | `agy --version` |
-| Authenticated `agy` session | For the CLI to work | `~/.gemini/antigravity-cli/` exists |
-| Outbound HTTPS to `api.telegram.org` | Bot polling | `curl -sSI https://api.telegram.org/` returns 200 |
+| `uv` ≥ 0.4 | Venv & dependency management | `uv --version` (install: `curl -LsSf https://astral.sh/uv/install.sh \| sh`) |
+| `agy` CLI on `PATH` | The backend CLI | `agy --version` |
+| Authenticated `agy` session | Required for CLI execution | `~/.gemini/antigravity-cli/` exists |
+| Outbound HTTPS to `api.telegram.org` | Telegram polling / API access | `curl -sSI https://api.telegram.org/` returns 200 |
 
-If `uv` is missing:
-
-```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-If `agy` is missing, install it from the official Antigravity distribution and run `agy` once to complete OAuth.
+If `agy` is missing, install it from the official Antigravity distribution and run `agy` once interactively to complete OAuth.
 
 ---
 
-## Get a Telegram bot token
+## Setup & Configuration
 
-1. Message [@BotFather](https://t.me/BotFather).
-2. Send `/newbot`.
-3. Pick a display name.
-4. Pick a username ending in `bot` (must be unique).
-5. Copy the token. Keep it secret — anyone with the token can post as the bot.
+### Get a Telegram Bot Token
 
-Recommended hardening:
+1. Open Telegram and message [@BotFather](https://t.me/BotFather).
+2. Send `/newbot` and follow the prompts to choose a display name and username (must end in `bot`).
+3. Copy the API token provided (format: `<digits>:<base64-ish>`). Keep it secret.
+4. Recommended hardening in BotFather:
+   - `/setprivacy` → choose your bot → `Disable`.
+   - `/setjoingroups` → choose your bot → `Disable`.
 
-- `/setprivacy` → your bot → `Disable`.
-- `/setjoingroups` → your bot → `Disable`.
-
----
-
-## Find your Telegram user ID
+### Find Your Telegram User ID
 
 The bridge is **default-deny**.
 
-**Option A:** message [@userinfobot](https://t.me/userinfobot).
+- **Option A:** Message [@userinfobot](https://t.me/userinfobot) to get your numeric ID.
+- **Option B:** Start the bridge once, send any message to the bot, and check the log:
+  ```sh
+  tail -f ~/.antigravity/bridge/logs/bridge.log
+  # Look for: "drop unauth user=123456789"
+  ```
+  Add that ID to `allowed_user_ids` in `config.json` and restart.
 
-**Option B:** start the bot once, send any message, then read the log:
+### Configuration Reference
 
-```sh
-tail -f ~/.antigravity/bridge/logs/bridge.log
-# "drop unauth user=123456789"
-```
-
-Add that ID to `allowed_user_ids`, restart, and you're in.
-
----
-
-## Configure the bridge
+Location: `~/.gemini/extensions/antigravity-telegram-bridge/config.json`
 
 ```sh
 cd ~/.gemini/extensions/antigravity-telegram-bridge
@@ -84,14 +90,14 @@ chmod 600 config.json
 $EDITOR config.json
 ```
 
-Fill in:
+Example `config.json`:
 
 ```json
 {
   "telegram": {
     "bot_token": "1234567890:ABCDEFghijklmnopqrstuvwxyz_-1234567890",
     "allowed_user_ids": [123456789],
-    "allowed_chat_ids": []
+    "allowed_chat_ids": [123456789]
   },
   "agy": {
     "chats_root": "",
@@ -102,41 +108,98 @@ Fill in:
 }
 ```
 
-Field-by-field:
-
-| Field | Required? | Notes |
+| Key | Required? | Description |
 |---|---|---|
-| `telegram.bot_token` | yes | From BotFather. Format `<int>:<base64-ish>`. |
-| `telegram.allowed_user_ids` | yes | Non-empty list of int IDs. Empty = refuse to start. |
-| `telegram.allowed_chat_ids` | optional | If non-empty, restricts chats even for allowed users. |
-| `agy.chats_root` | optional | Per-chat dirs. Default: `~/.antigravity/bridge/chats`. |
-| `agy.default_workdir` | optional | Base cwd for `agy`. |
-| `agy.model` | optional | Empty = `agy` default. |
-| `agy.mode` | optional | `code` (auto-approve) or `plan` (agent is instructed to only plan, not execute — no OS-level sandbox is applied). |
+| `telegram.bot_token` | **Yes** | Telegram Bot API token from BotFather. |
+| `telegram.allowed_user_ids` | **Yes** | Non-empty list of allowed numeric user IDs. |
+| `telegram.allowed_chat_ids` | Optional | Whitelist of allowed chat IDs (e.g. your DM user ID to prevent group use). |
+| `agy.chats_root` | Optional | Directory root for per-chat sessions (default: `~/.antigravity/bridge/chats`). |
+| `agy.default_workdir` | Optional | Base working directory for `agy`. |
+| `agy.model` | Optional | Override model ID (empty string = agy default). |
+| `agy.mode` | Optional | `code` (auto-approve) or `plan` (instructs agent to only plan; no OS-level isolation). |
 
-**Never commit `config.json`.** It is gitignored.
+> [!CAUTION]
+> **Never commit `config.json`**. It contains sensitive secrets and is gitignored.
 
 ---
 
-## Install
+## Installation
+
+Run the idempotent install script from the extension repository:
 
 ```sh
 cd ~/.gemini/extensions/antigravity-telegram-bridge
 bash install.sh
 ```
 
-What `install.sh` does (idempotent):
-
-1. Creates `~/.antigravity/bridge/{logs,runtime,chats}/`.
+What `install.sh` performs:
+1. Creates runtime directories: `~/.antigravity/bridge/{logs,runtime,chats}/`.
 2. Creates `~/.config/systemd/user/` if missing.
-3. Builds `.venv/` (skipped if present).
-4. Installs in editable mode: `uv pip install -e .`.
-5. Renders the systemd unit template to `~/.config/systemd/user/antigravity-telegram-bridge.service`.
-6. `systemctl --user daemon-reload && systemctl --user enable antigravity-telegram-bridge.service`.
+3. Creates a Python 3.11 venv at `.venv/` (if not already present).
+4. Installs the project in editable mode via `uv pip install -e .`.
+5. Renders the systemd user service template with paths to `~/.config/systemd/user/antigravity-telegram-bridge.service`.
+6. Executes `systemctl --user daemon-reload` and enables `antigravity-telegram-bridge.service`.
+7. Installs the `logrotate` config to `/etc/logrotate.d/antigravity-telegram-bridge` (if writable).
 
-The installer does **not** start the service.
+### Pre-flight Verification
 
-### Optional: enable lingering for headless boot
+Validate configuration, credentials, and dependencies:
+
+```sh
+echo '{"action":"setup"}' | .venv/bin/python -m src.control | python3 -m json.tool
+```
+
+---
+
+## Service Management
+
+### Quick Cheat-Sheet
+
+| Action | Command |
+|---|---|
+| **Start** | `systemctl --user start antigravity-telegram-bridge.service` |
+| **Stop** | `systemctl --user stop antigravity-telegram-bridge.service` |
+| **Restart** | `systemctl --user restart antigravity-telegram-bridge.service` |
+| **Status** | `systemctl --user status antigravity-telegram-bridge.service` |
+| **Live Logs** | `tail -f ~/.antigravity/bridge/logs/bridge.log` |
+| **Recent Journal** | `journalctl --user -u antigravity-telegram-bridge.service -n 100 --no-pager` |
+| **Self-Test** | `echo '{"action":"setup"}' \| .venv/bin/python -m src.control` |
+| **Health Check** | `curl -s http://127.0.0.1:9100/health \| jq .` |
+| **Prometheus Metrics** | `curl -s http://127.0.0.1:9100/metrics` |
+
+### Systemd Commands
+
+```bash
+# Check status
+systemctl --user status antigravity-telegram-bridge
+
+# Restart service (required after editing config.json)
+systemctl --user restart antigravity-telegram-bridge
+
+# Stop service
+systemctl --user stop antigravity-telegram-bridge
+```
+
+### Control via agy Plugin
+
+You can manage the daemon directly from an interactive `agy` session:
+
+```sh
+agy -p "use the bridge tool with action=start"
+agy -p "use the bridge tool with action=status"
+agy -p "use the bridge tool with action=logs and lines=200"
+agy -p "use the bridge tool with action=setup"
+```
+
+Or via direct tool pipe:
+
+```sh
+echo '{"action":"status"}' | ~/.gemini/extensions/antigravity-telegram-bridge/.venv/bin/python -m src.control
+```
+
+### Headless Boot (Lingering)
+
+To keep the user systemd instance running without an active SSH session:
 
 ```sh
 sudo loginctl enable-linger $USER
@@ -144,222 +207,292 @@ sudo loginctl enable-linger $USER
 
 ---
 
-## Start the bridge
+## Health Checks & Verification
 
-Three equivalent ways:
+### End-to-End Smoke Test
 
-```sh
-# 1. systemd directly
-systemctl --user start antigravity-telegram-bridge.service
+1. Open Telegram and send `/start` or `hello` to your bot.
+2. Within ~10s, verify the typing indicator appears, followed by an `agy` reply.
+3. Check the log for a turn event:
+   ```sh
+   tail -n 20 ~/.antigravity/bridge/logs/bridge.log
+   ```
+   You should see:
+   ```
+   INFO antigravity_telegram_bridge: turn chat=123456789 cwd=... exit=0 ms=... reply_len=...
+   ```
+4. Send a follow-up (e.g. `what did I just say?`) to confirm session continuity.
+5. From an unauthorized account, send a message. Verify that the message is ignored and the log displays:
+   ```
+   INFO antigravity_telegram_bridge: drop unauth user=999999999
+   ```
 
-# 2. From inside agy
-agy -p "use the bridge tool with action=start"
+### Health & Diagnostic Commands
 
-# 3. From any shell via the plugin entry point
-echo '{"action":"start"}' | ~/.gemini/extensions/antigravity-telegram-bridge/.venv/bin/python -m src.control
+```bash
+# 1. Process memory usage
+ps -o pid,rss,comm -p $(systemctl --user show -p MainPID --value antigravity-telegram-bridge)
+
+# 2. Telegram Bot API connectivity & token validity
+curl -s "https://api.telegram.org/bot<TOKEN>/getMe" | jq .ok
+
+# 3. Backend agy CLI status
+agy --version
+
+# 4. Recent turns log
+tail -20 ~/.antigravity/bridge/logs/bridge.log
+
+# 5. Local health HTTP endpoint
+curl -s http://127.0.0.1:9100/health | jq .
+
+# 6. Prometheus metrics endpoint
+curl -s http://127.0.0.1:9100/metrics
 ```
 
-Confirm:
-
-```sh
-systemctl --user is-active antigravity-telegram-bridge.service
-# expect: active
-```
-
-Full status:
-
-```sh
-systemctl --user status antigravity-telegram-bridge.service --no-pager
-```
+> [!NOTE]
+> The health and metrics server listens on port **9100** by default (to avoid conflicts with ports like 9099). You can override this using `AGY_BRIDGE_HEALTH_PORT=...` in the systemd unit.
 
 ---
 
-## Verify end-to-end
+## Hardening & Security
 
-1. From your phone, open the bot in Telegram.
-2. Send `/start` or `hello`.
-3. Within ~10s expect the typing indicator, then an `agy` reply.
-4. Check the log:
+### Systemd Hardening
+
+The bridge runs under systemd with applied sandboxing and defense-in-depth directives:
+
+| Directive | Value | Purpose |
+|---|---|---|
+| `PrivateTmp` | `true` | Isolated `/tmp` and `/var/tmp` directory |
+| `ProtectKernelTunables` | `true` | Kernel variables (`/proc/sys`, `/sys`) made read-only |
+| `ProtectKernelModules` | `true` | Module loading explicitly denied |
+| `ProtectControlGroups` | `true` | Control group hierarchies made read-only |
+| `LockPersonality` | `true` | Prevents changing execution domain / personality |
+| `RestrictNamespaces` | `true` | Restricts access to Linux namespaces |
+| `RestrictRealtime` | `true` | Prevents realtime scheduling priority escalation |
+| `UMask` | `0077` | New files created are 0600 / 0700 (inaccessible to group/others) |
+| `Restart` | `on-failure` / `always` | Automatic recovery from unexpected exits |
+| `RestartSec` | `5s` | Backoff delay before restart |
+| `MemoryMax` | `512M` *(optional override)* | Hard kill if exceeded |
+| `MemoryHigh` | `384M` *(optional override)* | Soft throttle |
+| `RuntimeMaxSec` | `86400` *(optional override)* | Daily restart to clear memory growth |
+
+> [!NOTE]
+> `RestrictAddressFamilies`, `RestrictSUIDSGID`, `NoNewPrivileges`, and `SystemCallFilter` are intentionally omitted in the service template because `agy` is run with `--dangerously-skip-permissions` to perform sysadmin and networking operations (such as `apt`, `sudo`, `nmap`, and `ping`) that need raw socket access, setuid binaries, and dynamic system calls.
+
+### File Permissions
+
+Verify runtime directories and sensitive files are restricted:
 
 ```sh
-tail -n 20 ~/.antigravity/bridge/logs/bridge.log
+chmod 700 ~/.antigravity/bridge ~/.antigravity/bridge/logs ~/.antigravity/bridge/runtime ~/.antigravity/bridge/chats
+chmod 600 ~/.gemini/extensions/antigravity-telegram-bridge/config.json ~/.antigravity/bridge/state.json ~/.antigravity/bridge/logs/bridge.log 2>/dev/null
 ```
 
-You should see one INFO line per turn:
+### Lock Bot to DM / Single Chat
 
-```
-2026-06-26 ... INFO antigravity_telegram_bridge: turn chat=123456789 cwd=... exit=0 ms=... reply_len=...
-```
+Set `allowed_chat_ids` in `config.json` to your direct message user ID:
 
-5. Send a follow-up like `what did I just say?`. The reply should reference the previous message — proves session continuity.
-6. From a non-allowed account, send a message. Expect no reply. Log shows:
-
-```
-INFO antigravity_telegram_bridge: drop unauth user=999999999
-```
-
-7. Health check:
-
-```sh
-curl http://127.0.0.1:9100/health
+```json
+{
+  "telegram": {
+    "allowed_user_ids": [123456789],
+    "allowed_chat_ids": [123456789]
+  }
+}
 ```
 
-If all pass, you're operating cleanly.
+This prevents the bot from responding even if added to a Telegram group.
+
+### Token Hygiene & Rotation
+
+The Telegram bot token resides in `config.json` (mode `0600`, gitignored) and in daemon memory. To rotate a token:
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather) → `/token` → select your bot → `/revoke`.
+2. Copy the new token and update `config.json`.
+3. Restart the service:
+   ```sh
+   systemctl --user restart antigravity-telegram-bridge.service
+   ```
+
+### Backups
+
+Exclude `~/.antigravity/bridge/logs/bridge.log` and `config.json` from unencrypted backups, or ensure backups are encrypted at rest.
 
 ---
 
-## Daily ops
+## Log Rotation
 
-### Cheat-sheet
-
-| Action | Command |
-|---|---|
-| Start | `systemctl --user start antigravity-telegram-bridge.service` |
-| Stop | `systemctl --user stop antigravity-telegram-bridge.service` |
-| Restart | `systemctl --user restart antigravity-telegram-bridge.service` |
-| Status | `systemctl --user status antigravity-telegram-bridge.service` |
-| Live log | `tail -f ~/.antigravity/bridge/logs/bridge.log` |
-| Recent journal | `journalctl --user -u antigravity-telegram-bridge.service -n 100 --no-pager` |
-| Validate config + tools | `echo '{"action":"setup"}' \| .venv/bin/python -m src.control` |
-| Health | `curl http://127.0.0.1:9100/health` |
-| Metrics | `curl http://127.0.0.1:9100/metrics` |
-
-The health/metrics port defaults to **9100** to avoid conflicting with the
-Kimi bridge on 9099. Set `AGY_BRIDGE_HEALTH_PORT` in the systemd unit to
-override.
-
-### From inside agy
-
-```sh
-agy -p "use the bridge tool with action=status"
-agy -p "use the bridge tool with action=logs and lines=200"
-agy -p "use the bridge tool with action=setup"
-```
-
-The tool returns `{"ok": bool, "output": str}`; `agy` paraphrases it.
-
-### Reload after config edits
-
-```sh
-systemctl --user restart antigravity-telegram-bridge.service
-```
-
-The daemon re-reads `config.json` only at startup.
-
-### Log rotation
-
-`bridge.log` grows unbounded. Add a logrotate rule at `/etc/logrotate.d/antigravity-telegram-bridge`:
+The log file at `~/.antigravity/bridge/logs/bridge.log` receives all stdout and stderr. A logrotate configuration is provided at `systemd/antigravity-telegram-bridge.logrotate` and installed to `/etc/logrotate.d/antigravity-telegram-bridge`:
 
 ```
 /home/YOUR_USER/.antigravity/bridge/logs/bridge.log {
     weekly
-    rotate 4
+    rotate 8
     compress
+    delaycompress
     missingok
     notifempty
     copytruncate
+    create 600 YOUR_USER YOUR_USER
 }
 ```
+
+*`copytruncate` is required because systemd maintains the open file descriptor across turns.*
+
+---
+
+## Metrics & Observability
+
+### Turn Log Entries
+
+Each completed turn writes a structured INFO entry to `bridge.log`:
+
+```
+2026-06-26 12:00:00 INFO antigravity_telegram_bridge: turn chat=123456789 cwd=/home/user/.antigravity/bridge/chats/123456789 exit=0 ms=1420 reply_len=85
+```
+
+Key fields:
+- `chat`: Telegram chat ID
+- `cwd`: Project working directory
+- `exit`: `agy` process exit code
+- `ms`: Execution duration in milliseconds
+- `reply_len`: Response length in characters
+
+### Prometheus Endpoint
+
+Available at `http://127.0.0.1:9100/metrics`:
+
+- `antigravity_bridge_turns_total`: Total turns handled by the bridge
+- `antigravity_bridge_errors_total`: Total failed turns / error responses
 
 ---
 
 ## Troubleshooting
 
-### "Bot not responding" — check the chain
+### Memory Growth & Limits
+
+- **Normal cold-start:** ~20 MB
+- **Expected growth:** Up to ~150 MB over multiple days of active turns
+- **Soft throttling (`MemoryHigh`):** Triggered at >384 MB
+- **Hard kill & auto-restart (`MemoryMax`):** Triggered at >512 MB
+
+To manually clear memory:
 
 ```sh
-# 1. Is the daemon running?
-systemctl --user is-active antigravity-telegram-bridge.service
-
-# 2. Recent log
-journalctl --user -u antigravity-telegram-bridge.service -n 50 --no-pager
-
-# 3. Validate config + tools
-cd ~/.gemini/extensions/antigravity-telegram-bridge
-echo '{"action":"setup"}' | .venv/bin/python -m src.control
+systemctl --user restart antigravity-telegram-bridge.service
 ```
 
-### Common failure modes
+### Bot Not Responding Checklist
 
-#### "telegram getUpdates failed: Unauthorized"
+Follow the 5-step diagnostic chain:
 
-The bot token is wrong or revoked. Re-paste from BotFather.
+1. **Check bridge status:**
+   ```sh
+   systemctl --user status antigravity-telegram-bridge.service
+   ```
+2. **Verify bot token validity:**
+   ```sh
+   curl -s "https://api.telegram.org/bot<TOKEN>/getMe" | jq .
+   ```
+3. **Verify outbound network connectivity:**
+   ```sh
+   curl -sSI "https://api.telegram.org"
+   ```
+4. **Inspect live logs:**
+   ```sh
+   tail -n 50 ~/.antigravity/bridge/logs/bridge.log
+   ```
+5. **Run the pre-flight self-test:**
+   ```sh
+   echo '{"action":"setup"}' | .venv/bin/python -m src.control
+   ```
 
-#### "agy CLI not found on PATH"
+### agy CLI Errors
 
-Either `agy` is not installed or systemd's PATH doesn't include it. The unit exports `PATH=$HOME/.local/bin:...`; if `agy` is elsewhere, edit the rendered unit and `daemon-reload`.
+1. **Verify executable on PATH:**
+   ```sh
+   agy --version
+   ```
+2. **Verify OAuth auth directory:**
+   ```sh
+   ls -la ~/.gemini/antigravity-cli/
+   ```
+3. **Re-authenticate:**
+   Run `agy` interactively in your terminal and complete the login/OAuth flow.
+4. **Restart bridge service:**
+   ```sh
+   systemctl --user restart antigravity-telegram-bridge.service
+   ```
 
-#### "agy error (exit ...)")
+### Webhook Issues
 
-`agy` failed. Common causes:
+If running in webhook receiver mode:
 
-- OAuth expired: run `agy` interactively to refresh.
-- Model ID invalid: check `agy models` and update config or picker.
-- Prompt too long or unsupported.
+1. Verify `CTI_WEBHOOK_URL` and `CTI_WEBHOOK_PORT` are exported in the environment.
+2. Confirm the host port is reachable externally from Telegram IP addresses.
+3. Check `bridge.log` for webhook registration results.
+4. Verify the secret token matches between Telegram registration and local receiver.
 
-Check the full stderr in the log.
+### Common Failure Modes & Solutions
 
-#### "agy timed out after 900.0s"
-
-A single turn ran for 15 minutes and was killed. Either the prompt was unusually heavy or `agy` is stuck. Bump `AGY_TIMEOUT_S` in `src/turn.py` if your workload genuinely needs longer turns.
-
-#### Bridge replies with `(empty reply)`
-
-`agy` exited 0 but emitted no text. Check the actual prompt/response by running `agy` manually in the chat directory.
-
-#### Telegram replies truncated
-
-Single message exceeds 4096 chars. The bridge auto-splits at newline boundaries. If one paragraph is itself over 4096 chars, it hard-splits — ugly but never lost.
-
-#### Leaked token in git history
-
-Rotate the token in BotFather, update `config.json`, and scrub history:
-
-```sh
-git filter-repo --path config.json --invert-paths
-git push --force-with-lease
-```
+| Symptom / Log Error | Root Cause | Solution |
+|---|---|---|
+| `telegram getUpdates failed: Unauthorized` | Token is invalid, expired, or revoked. | Retrieve a new token from BotFather, update `config.json`, and restart. |
+| `agy CLI not found on PATH` | `agy` is missing from systemd PATH. | Ensure `agy` is in `~/.local/bin` or update `Environment=PATH=...` in the service file and run `daemon-reload`. |
+| `agy error (exit <code>)` | Backend CLI failed (expired OAuth, invalid model, prompt error). | Check full stderr in `bridge.log`; re-run `agy` interactively or fix model string in `config.json`. |
+| `agy timed out after 900.0s` | Turn ran for >15 minutes and was terminated. | If long turns are expected, adjust `AGY_TIMEOUT_S` in `src/turn.py`. |
+| Bridge replies with `(empty reply)` | `agy` exited 0 without printing text. | Test the command manually in `~/.antigravity/bridge/chats/<chat_id>`. |
+| Telegram replies truncated | Output exceeds Telegram's 4096 character limit. | The bridge auto-splits messages at newlines. Extremely long blocks are hard-chunked. |
+| Leaked token in git history | Token was accidentally committed. | Revoke token in BotFather, update `config.json`, and scrub git history with `git filter-repo`. |
 
 ---
 
 ## Upgrading
 
+To update from the repository:
+
 ```sh
 cd ~/.gemini/extensions/antigravity-telegram-bridge
 git pull
-bash install.sh
+bash install.sh   # Idempotent: updates dependencies and re-renders service unit
 systemctl --user restart antigravity-telegram-bridge.service
 ```
-
-`install.sh` is idempotent — it refreshes deps and re-renders the systemd unit.
 
 ---
 
 ## Uninstall
 
-Complete removal:
+### Complete Removal
 
 ```sh
+# Stop and unregister service
 systemctl --user disable --now antigravity-telegram-bridge.service
 rm -f ~/.config/systemd/user/antigravity-telegram-bridge.service
 systemctl --user daemon-reload
+
+# Remove extension code and runtime state
 rm -rf ~/.gemini/extensions/antigravity-telegram-bridge ~/.antigravity/bridge
 ```
 
-To keep the code but stop running:
+### Temporary Pause
+
+To keep files but stop running:
 
 ```sh
 systemctl --user disable --now antigravity-telegram-bridge.service
+```
+
+Re-enable when ready:
+
+```sh
+systemctl --user enable --now antigravity-telegram-bridge.service
 ```
 
 ---
 
-## Pushing to GitHub
+## Pushing to GitHub & Pre-Push Checklist
 
-The repo lives at `~/.gemini/extensions/antigravity-telegram-bridge/`. To publish:
-
-1. Create the empty repository on GitHub. Do not initialize it with a README or LICENSE.
-2. Add the remote and push:
+### Publishing
 
 ```sh
 cd ~/.gemini/extensions/antigravity-telegram-bridge
@@ -367,74 +500,62 @@ git remote add origin https://github.com/YOUR_USER/agy-to-im.git
 git push -u origin main
 ```
 
-3. The first push triggers GitHub Actions (`.github/workflows/test.yml`).
+### Pre-Push Security Checklist
 
-4. Tag a release:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-### Pre-push checklist
+Before pushing, verify that no secrets or tokens are committed:
 
 ```sh
-git ls-files | xargs grep -l 'bot_token\|api_key\|password' 2>/dev/null
-# Should match only example + docs — never config.json with a real token.
+# 1. Verify config.json is ignored
 git ls-files | grep -E '^config\.json$'
-# Should be empty (config.json is gitignored).
+
+# 2. Check for leaked secrets
+git ls-files | xargs grep -l 'bot_token\|api_key\|password' 2>/dev/null
+# (Should only match examples and documentation templates)
 ```
 
 ---
 
-## Architecture refresher
+## Architecture Refresher & File Index
+
+### Two-Layer Architecture
 
 ```
-                               ┌─────────────────────────────┐
-                               │  ~/.gemini/extensions/       │
-                               │   antigravity-telegram-bridge/
-                               │   antigravity-extension.json │   ← agy sees this plugin
-       agy session ───────────▶│   src/control.py "bridge"    │     and can call its tool
-                               │     tool (start/stop/...)    │
-                               └────────────┬────────────────┘
-                                            │ systemctl --user
-                                            ▼
-                               ┌─────────────────────────────┐
-                               │  systemd-supervised daemon   │
-                               │  python -m src.daemon        │
-                               │                              │
-       Telegram phone ───────▶ │  • polls getUpdates          │
-                               │  • parse_update / callbacks  │
-                               │  • is_authorized             │
-                               │  • run_agy (subprocess)      │── agy -p prompt
-                               │  • sendMessage               │           --continue/--new-project
-                               │                              │
-                               │  state: ~/.antigravity/bridge│
-                               │    state.json                │
-                               └─────────────────────────────┘
+                               ┌─────────────────────────────────────────┐
+                               │  ~/.gemini/extensions/                  │
+                               │   antigravity-telegram-bridge/          │
+                               │   antigravity-extension.json            │   ← agy plugin manifest
+       agy CLI session ───────▶│   src/control.py "bridge"               │     (start/stop/status/logs)
+                               │     tool dispatcher                     │
+                               └────────────────────┬────────────────────┘
+                                                    │ systemctl --user
+                                                    ▼
+                               ┌─────────────────────────────────────────┐
+                               │  systemd user daemon                    │
+                               │  python -m src.daemon                   │
+                               │                                         │
+       Telegram Phone ────────▶│  • Polls getUpdates / Webhook receiver  │
+                               │  • Authentication & Rate Limiting       │
+                               │  • Spawns agy subprocess                │── agy -p "<prompt>"
+                               │  • Formats & sends replies              │           --continue/--new-project
+                               │                                         │
+                               │  State: ~/.antigravity/bridge/          │
+                               │    state.json (chat sessions)           │
+                               └─────────────────────────────────────────┘
 ```
 
-Code lives in the plugin dir; mutable runtime state lives in `~/.antigravity/bridge/`.
-
-For full architectural detail see [`design.md`](design.md).
-
----
-
-## Index of source files
+### Source File Index
 
 | Path | Responsibility |
 |---|---|
-| `src/config.py` | Parse + validate `config.json` |
-| `src/state.py` | Atomic JSON state |
-| `src/telegram.py` | Pure helpers + async `TelegramClient` |
-| `src/agy_runner.py` | Build argv and spawn `agy` |
-| `src/commands.py` | Slash commands + inline-keyboard callbacks |
-| `src/turn.py` | Per-turn execution with typing heartbeat |
-| `src/daemon.py` | Main poll/webhook loop |
-| `src/control.py` | Plugin-tool dispatcher |
-| `src/health.py` | Health + metrics HTTP server |
-| `src/media.py` | Photo/document/inbox handling |
-| `src/queue.py` | FIFO turn queue |
-| `src/webhook.py` | Webhook receiver + HMAC verification |
-
-Test coverage: **112 tests**, runs in under 2 seconds.
+| `src/config.py` | Parse and validate `config.json` |
+| `src/state.py` | Atomic JSON state management (`state.json`) |
+| `src/telegram.py` | Telegram HTTP client, message chunking, authorization helpers |
+| `src/agy_runner.py` | Builds argv and spawns `agy` CLI subprocess |
+| `src/commands.py` | Slash command dispatching and inline keyboard callbacks |
+| `src/turn.py` | Per-turn execution lifecycle with typing indicator heartbeat |
+| `src/daemon.py` | Main polling/webhook loop and message orchestration |
+| `src/control.py` | CLI plugin tool entry point (`start`, `stop`, `status`, `logs`, `setup`) |
+| `src/health.py` | `/health` and `/metrics` HTTP server |
+| `src/media.py` | Photo and document download and inbox handling |
+| `src/queue.py` | Sliding-window rate limiting and FIFO turn queue |
+| `src/webhook.py` | Webhook HTTP receiver with HMAC secret verification |
